@@ -18,7 +18,9 @@ def generate_patients(n: int, random_seed: int) -> pl.DataFrame:
 
     np.random.seed(random_seed)
     ages = np.random.randint(20, 80, size=n)
+    gender = np.random.choice(['Male', 'Female'], size=n)
 
     return pl.DataFrame({
-        "age": ages
+        "age": ages, 
+        "gender": gender,
     })
