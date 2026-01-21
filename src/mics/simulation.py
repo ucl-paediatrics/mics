@@ -1,5 +1,7 @@
+"""Functions to generate simulated patient data for the MICS project."""
 import numpy as np
 import polars as pl
+
 
 def generate_patients(n: int, random_seed: int) -> pl.DataFrame:
     """Generate a simulated patient dataset with n records.

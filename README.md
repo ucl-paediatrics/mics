@@ -14,4 +14,9 @@ This repository contains code for the MICS study, an in silico experimental appr
    ```bash
    uv run nbstripout --install
    ```
+4. Install mics as a local project for easier coding:
+
+   ```bash
+   uv run pip install -e .
+   ```
 
