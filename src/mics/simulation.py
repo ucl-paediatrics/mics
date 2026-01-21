@@ -21,8 +21,12 @@ def generate_patients(n: int, random_seed: int) -> pl.DataFrame:
     np.random.seed(random_seed)
     ages = np.random.randint(20, 80, size=n)
     gender = np.random.choice(['Male', 'Female'], size=n)
+    history_of_stroke = np.random.choice([0, 1], size=n, p=[0.98, 0.02])
+    high_cholesterol = np.random.choice([0, 1], size=n, p=[0.7, 0.3])
 
     return pl.DataFrame({
         "age": ages, 
         "gender": gender,
+        "history_of_stroke": history_of_stroke,
+        "high_cholesterol": high_cholesterol
     })

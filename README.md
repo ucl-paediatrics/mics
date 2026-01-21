@@ -14,7 +14,20 @@ This repository contains code for the MICS study, an in silico experimental appr
    ```bash
    uv run nbstripout --install
    ```
-4. Install mics as a local project for easier coding:
+
+4. In the terminal, make sure the venv is activated:
+
+   ```bash
+   .\.venv\Scripts\activate
+   ```
+If this doesn't work in Windows, you may need to change the execution policy (in a Powershell terminal running as Administrator):
+   ```bash
+   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+   ```
+
+The command line sho
+
+5. Install mics as a local project for easier coding:
 
    ```bash
    uv run pip install -e .
