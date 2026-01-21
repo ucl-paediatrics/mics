@@ -6,6 +6,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "jupyter>=1.1.1",
+    "matplotlib>=3.10.8",
+    "nbstripout>=0.9.0",
     "numpy>=2.4.0",
+    "pandas>=2.3.3",
     "polars>=1.36.1",
+    "pyarrow>=23.0.0",
+    "ruff>=0.14.13",
+    "seaborn>=0.13.2",
 ]
