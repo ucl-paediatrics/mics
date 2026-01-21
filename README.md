@@ -7,7 +7,7 @@ This repository contains code for the MICS study, an in silico experimental appr
 2. Install dependencies using `uv`:
 
    ```bash
-   uv install
+   uv sync
    ```
 3. Set up `nbstripout` to clean notebooks before committing:
 
