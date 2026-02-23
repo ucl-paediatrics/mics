@@ -1,32 +1,51 @@
-"""Functions to generate simulated patient data for the MICS project."""
-import numpy as np
-import polars as pl
+# Import all necessary coding libaries 
+import polars as pl 
+import pandas as pd
+import numpy as np 
+import seaborn as sns
+import seaborn as sns
 
+# Import model creation libaries 
 
-def generate_patients(n: int, random_seed: int) -> pl.DataFrame:
-    """Generate a simulated patient dataset with n records.
+#### MODEL 1 - Pre-treatment Simulation & Training ####
+
+# STEP 1: Create a simulated population of 100k patinets 
+
+# STEP 2: Simulate patinet characteristics using literature based numbers 
+def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
+    """Generate as simulated patient dataset containing variables from the QRISK3 algorithm, with n records.
     
     Args:
-        n (int): Number of patient records to generate.
-        random_seed (int): Seed for random number generator for reproducibility.
-    
-    Returns:
-        pl.DataFrame: A Polars DataFrame containing simulated patient data. 
+    n(int):Number of patinet records to generate. 
+    random_seed(int):Seed for random number generator for reproducibility
 
-    Current columns in the simulated dataset:
-        - age (int): Age of the patient, randomly generated between 20 and 80
-    
+    Returns:
+    pl.DataFrame: A Polas DataFrame containing simulated patient data.
+
+    Current columns in the simulated dataset: 
+    -age(int):Age of the patient, randomly generated between 20 and 80 
+    - sex(str):Sex of the pateint, randomly assigned Male or Female 
+    -
     """
 
-    np.random.seed(random_seed)
+    # DEMOGRAPHICS: 
     ages = np.random.randint(20, 80, size=n)
-    gender = np.random.choice(['Male', 'Female'], size=n)
-    history_of_stroke = np.random.choice([0, 1], size=n, p=[0.98, 0.02])
-    high_cholesterol = np.random.choice([0, 1], size=n, p=[0.7, 0.3])
+    sex = np.random.choice(["Male","Female"], size=n)
 
+    # Ethnicity: 
+    # 9 ethnic groups outlined by the QRISK3 algorithm
+    # p is the proportion the simulation model should assign each ethnicity
+    ethnicity = np.random.choice(
+        ["White","Black African","Black Caribbean",
+        "Indian","Pakistani","Bangladeshi","Chinese","Other Asian", "Other Ethic Group"],
+        size=n,
+        p=[0.850, 0.025, 0.015, 0.010, 0.010, 0.015, 0.015, 0.010, 0.050]
+        )
+
+
+    # Polas dataframe showing the QRISK3 variables
     return pl.DataFrame({
-        "age": ages, 
-        "gender": gender,
-        "history_of_stroke": history_of_stroke,
-        "high_cholesterol": high_cholesterol
-    })
+        # Demographics
+        "Age": ages,
+        "Sex": sex,
+        "Ethnicity": ethnicity})
