@@ -1,14 +1,13 @@
 """Generate a simulated patient dataset containing variables from the QRISK3 algorithm."""
 # Import all necessary coding libaries
-# Import all necessary coding libaries 
 import numpy as np
 import polars as pl
 
 #### MODEL 1 - Pre-treatment Simulation & Training ####
 
-# STEP 1: Create a simulated population of 100k patinets 
+# STEP 1: Create a simulated population of 100k patinets
 
-# STEP 2: Simulate patinet characteristics using literature based numbers 
+# STEP 2: Simulate patinet characteristics using literature based numbers
 # Yes = 1, No = 0
 
 def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
@@ -30,14 +29,14 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     """
     # SET RANDOM SEED:
     np.random.seed(random_seed)
-    # DEMOGRAPHICS: 
+    # DEMOGRAPHICS:
     ages = np.random.randint(20, 80, size=n)
     sex = np.random.choice(["Male","Female"], size=n)
 
-    # Ethnicity: 
-    # 9 ethnic groups outlined by the QRISK3 algorithm 
-    # - need to find repuatble data sources/links for each of the risk factors. 
-    # - need to adjust the proportions based on the census. 
+    # Ethnicity:
+    # 9 ethnic groups outlined by the QRISK3 algorithm
+    # - need to find repuatble data sources/links for each of the risk factors.
+    # - need to adjust the proportions based on the census.
     uk_ethnicities = {
         "White":  0.850,
         "Indian": 0.010,
@@ -57,34 +56,41 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
         size=n
     )
 
-    # CLINICAL MEASUREMENTS: 
+    # CLINICAL MEASUREMENTS:
 
     # BMI:
-    height_m = np.random.uniform(1.50, 2.00, size=n) # Use 'uniform' for float numbers 
+    #TODO: Is uniform distribution appropriate for height / weight - these are usually modelled as normal.
+    height_m = np.random.uniform(1.50, 2.00, size=n) # Use 'uniform' for float numbers
     weight_kg = np.random.uniform(45.00, 120.00, size=n)
     bmi_calculated = np.round((weight_kg / height_m **2), 2)
+    # TODO: Not sure if clipping is the right approach. Perhaps normal distributions would work better.
+    # Could refactor this as:
+    #  1. Generate BMI, normally distributed, with a mean of 27 and a standard deviation of 3
+    #    which are typical values for the general population. 
+    #    Just check you're not getting BMIs below around 15 or above 50.
+    #  2. Then generate some reasonable heights
+    #  3. Calculate the weights based on the generated BMI and heights, using the formula: weight = BMI * height^2.
     bmi = bmi_calculated.clip(15,50) # Setting the realistic min and max values for final BMI score
 
     # Systolic Blood Pressure: UK ideal blood pressure is 120 mmHg
     # Average blood pressure can increase with age
-    # Here there is a 0.5 mmHg increase in sbp with each year of age 
+    # Here there is a 0.5 mmHg increase in sbp with each year of age
 
-    # Using a minimum of 3 sbp readings to calculate the SD 
+    # Using a minimum of 3 sbp readings to calculate the SD
     # Literatures states 2 or more readings are needed
     # scale=10 allows for sbp values vary by 10 from the patients baseline with each different reading
-    bp_reading1 = np.random.normal(120 + (0.5 * ages), scale=10, size=n).clip(90,220) 
-    bp_reading2 = np.random.normal(120 + (0.5 * ages), scale=10, size=n).clip(90,220)
-    bp_reading3 = np.random.normal(120 + (0.5 * ages), scale=10, size=n).clip(90,220)
+    underlying_sbp = np.random.normal(120 + (0.2 * ages), scale=10, size=n)
+    noise = np.random.normal(0, 5, size=(n,3)) # 3 readings per patient
+    # Add noise to the underlying sbp to get the three readings
+    collated_readings = underlying_sbp[:, np.newaxis] + noise
 
-    # Stack the columns so that each pateint's sbp SD can be called across the readings
-    collated_readings = np.column_stack([bp_reading1, bp_reading2, bp_reading3])
     # Shows one value for the sbp reading in the dataframe - the most current reading, rounded to 2 d.p
-    systolic_bp_mmHg = np.round(bp_reading1, 2)
+    systolic_bp_mmHg = np.round(collated_readings[:, 0], 2) #pylint: disable=invalid-name
 
-    # Standard Deviation: 
+    # Standard Deviation:
     # This provides a 'history' of sbp values for the patinets in order summarise their variabilities
-    # Axis = 1, reading across the array (rows) of sbp readings to calculate the final SD value per patinet 
-    sd_systolic_bp_mmHg = np.round(np.std(collated_readings, axis= 1), 2)
+    # Axis = 1, reading across the array (rows) of sbp readings to calculate the final SD value per patient
+    sd_systolic_bp_mmHg = np.round(np.std(collated_readings, axis= 1), 2) #pylint: disable=invalid-name
 
     # Total Cholesterol / HDL ("good" cholesterol) - Ratio
     # UK average TC:HDL normal range is between 3.5-5
@@ -100,7 +106,7 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
         "Light Smoker": 0.10,
         "Moderate Smoker": 0.05,
         "Heavy Smoker": 0.05
-        
+
     }
 
     smoking_status = np.random.choice(
@@ -112,37 +118,37 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     # MEDICAL CONDITIONS:
 
     # Type 2 Diabetes: About 8% of adults in the UK are diagnosed with it.
-    # the probability of develping it increases with age. 
+    # the probability of develping it increases with age.
     # Type 1 Diabetes: Is a rare occurance, about 1% of adults in the UK are diagnosed. It is independent of age.
     # No one can have both Type 1 and Type 2
     diabetes_status = []
 
-    for age in ages: 
+    for age in ages:
         if age < 40:
             type2_prob = 0.08 * 0.60 # This reduces the probability to 4.8% in younger patients
         elif age >= 40 and age < 60:
             type2_prob = 0.08
-        elif age >= 60: 
+        else:
             type2_prob = 0.08 * 1.5 # This incrases the probability to 12% in older patients
-    
-        type1_prob = 0.01
-        none_prob = 1 - type1_prob - type2_prob # All the probability values must equal to 1 
- 
-        status = np.random.choice(
-        ["None", "Type 1", "Type 2"], 
-        p=[none_prob, type1_prob, type2_prob],
-        size=n
-        )
 
-    diabetes_status.append(status) 
+        type1_prob = 0.01
+        none_prob = 1 - type1_prob - type2_prob # All the probability values must equal to 1
+
+        this_patient_status = np.random.choice(
+        ["None", "Type 1", "Type 2"],
+        p=[none_prob, type1_prob, type2_prob],
+        size=1
+        )[0]
+
+        diabetes_status.append(this_patient_status)
     # need to ensure that the complete for loop for type2 diabetes runs in all the patients
 
     # Chronic Kidney Disease (Stages 3-5): About 10% of adults in the UK have this
-    # Risk increases and chances becomes greater in adults aged 35+ 
-    
-    # np.where - selects elements based on conditions, it allows you to filter and transform data in an array 
-    # 10% of the population have a chance of devloping ckd 
-    # the 'Yes' for the condition >=35 ->  need to find what percentage that chances increase over 35 
+    # Risk increases and chances becomes greater in adults aged 35+
+
+    # np.where - selects elements based on conditions, it allows you to filter and transform data in an array
+    # 10% of the population have a chance of devloping ckd
+    # the 'Yes' for the condition >=35 ->  need to find what percentage that chances increase over 35
 
     # ckd_prob = np.where(ages >= 35, 0.10)
 
@@ -152,7 +158,7 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     chronic_kidney_disease = np.random.choice([1, 0], size=n, p=[0.10, 0.90])
 
     # Atrial Fibrillation: About 2.5% of the population have this, rises sharply with age
-    # Need to account for age! 
+    #TODO: Need to account for age!
     atrial_fibrillation = np.random.choice([1, 0], size=n, p=[0.025, 0.975])
 
     # Rheumatoid arthritis: 1% prevalence in UK population
@@ -171,14 +177,15 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
         np.random.choice([1, 0], size=n, p=[0.13, 0.87])
     )
 
-    # Erectile Disfunction: Around 50% of men experience this at some point 
+    # Erectile Disfunction: Around 50% of men experience this at some point
     # It is more prevelant in older men aged 40-70
-    # It is not clinically possible for females to get such issues 
+    # It is not clinically possible for females to get such issues
     erectile_disfunction = np.where(
         (sex == "Male") & ages >= 40,
-        np.random.choice([1, 0], size=n, p=[0.50, 0.50])
+        np.random.choice([1, 0], size=n, p=[0.50, 0.50]),
+        np.zeros(n, dtype=int)
     )
-    
+
     # MEDICATIONS:
 
     # Corticosteroids: Around 1% of adults in the UK are currently using them
@@ -227,7 +234,7 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
         "Family_History_CHD": family_history_chd
         })
 
-# STEP 3: Generate the risk function 
+# STEP 3: Generate the risk function
 def calculate_qrisk3(X: pl.DataFrame) -> np.ndarray:
     """Calculate the QRISK3 score for each patient in the dataset.
     
@@ -241,15 +248,16 @@ def calculate_qrisk3(X: pl.DataFrame) -> np.ndarray:
     ## 1. Extract all the variables from the model
 
     # Continuous Variables
-    age_risk = X["Age"].to_numpy() 
-    sex_risk = X["Sex"].to_numpy()
+    age_risk = X["Age"].to_numpy()
+    sex_risk = (X["Sex"]=="Female").to_numpy()
     bmi_risk = X["BMI"].to_numpy()
     sbp_risk = X["Systolic_Blood_Pressure"].to_numpy()
     sd_sbp_risk = X["SD_Systolic_Blood_Pressure"].to_numpy()
     chdl_risk = X["Cholesterol_HDL_Ratio"].to_numpy()
 
     # Categorical Variables
-    # Need to account for these variables with their  covariates to ensure that a numerical relationship isn't assummed 
+    # Need to account for these variables with their  covariates to ensure that a numerical relationship isn't assummed
+    # TODO (Alex): Check R source code, make sure the reference risks are right
     ethnicity_coefficients = {
         "White": 0.0000, # Reference 
         "Indian": 0.2804,
@@ -261,22 +269,22 @@ def calculate_qrisk3(X: pl.DataFrame) -> np.ndarray:
         "Chinese": -0.3263,
         "Other Ethnic Group": -0.1713
     }
-    
+
     smoking_status_coefficients =  {
         "Non-Smoker": 0.0000,
         "Ex Smoker": 0.1339,
         "Light Smoker": 0.5620,
         "Moderate Smoker": 0.6675,
         "Heavy Smoker": 0.8495
-        
+
     }
 
-    ethnicity_risk = X["Ethnicity"].replace(ethnicity_coefficients).to_numpy()
-    smoking_risk = X["Smoking_Status"].replace(smoking_status_coefficients).to_numpy()
+    ethnicity_risk = X["Ethnicity"].replace(ethnicity_coefficients).cast(pl.Float64).to_numpy()
+    smoking_risk = X["Smoking_Status"].replace(smoking_status_coefficients).cast(pl.Float64).to_numpy()
 
-    # Binaray Conditions (Y=1, N=0) 
-    diabetes_risk = (X["Diabetes_Status"] == "Type 1").to_numpy() * 1.727 \
-        + (X["Diabetes_Status"] == "Type 2").to_numpy() * 1.069
+    # Binaray Conditions (Y=1, N=0)
+    t1_risk = (X["Diabetes_Status"] == "Type 1").to_numpy() 
+    t2_risk = (X["Diabetes_Status"] == "Type 2").to_numpy()
     sle_risk = X["Systemic_Lupus_Erythematosus"].to_numpy()
     mental_risk = X["Severe_Mental_Illness"].to_numpy()
     ckd_risk = X["CKD"].to_numpy()
@@ -288,12 +296,12 @@ def calculate_qrisk3(X: pl.DataFrame) -> np.ndarray:
     aa_risk = X["Atypical_Antipsychotics"].to_numpy()
     bp_meds_risk = X["Blood_Pressure_Medication"].to_numpy()
     fh_risk = X["Family_History_CHD"].to_numpy()
-        
+
     ## 2. Multiply each risk factor by its corresponding QRISK3 weight and sum into 'weighted_sum'
-    #   weighted_sum is a single number that represents the combined weighted risk for eacj pateint 
+    #   weighted_sum is a single number that represents the combined weighted risk for eacj pateint
 
     weighted_sum = (
-         # Continuous Variables
+        # Continuous Variables
         age_risk * 0.08
         + sex_risk * -0.40
         + bmi_risk * 0.029
@@ -302,11 +310,12 @@ def calculate_qrisk3(X: pl.DataFrame) -> np.ndarray:
         + chdl_risk * 0.153
 
          # Categorical Variables
-        + ethnicity_risk 
+        + ethnicity_risk
         + smoking_risk
 
-        # Binaray Conditions 
-        + diabetes_risk
+        # Binaray Conditions
+        + t1_risk * 1.727
+        + t2_risk * 1.069
         + sle_risk * 0.759
         + mental_risk * 0.126
         + ckd_risk * 0.652
@@ -321,10 +330,11 @@ def calculate_qrisk3(X: pl.DataFrame) -> np.ndarray:
     )
 
     ## 3. Covert the weighted_sum into 'final risk' for each patinet
-    #   Using the logistic regression sigmoid function to gnerate a probability value between 0 and 1 
-    #   𝑝(𝐱) = 1 / (1 + exp(−𝑓(𝐱))
-    #   𝑝(𝐱) is often interpreted as the predicted probability that the output for a given 𝐱 is equal to 1. 
+    #   Using the logistic regression sigmoid function to gnerate a probability value between 0 and 1
+    #   p(x) = 1 / (1 + exp(−f(x))
+    #   p(x) is often interpreted as the predicted probability that the output for a given x is equal to 1.
+
 
     risk = 1 / (1 + np.exp(-weighted_sum))
- 
+
     return risk
