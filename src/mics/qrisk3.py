@@ -52,6 +52,8 @@ def calculate_qrisk3(data: pl.DataFrame) -> pl.Series:
     
     This function returns the 10 year risk of cardiovascular disease for each individual in the dataset, 
     as a percentage.
+
+    TODO: Implement statin effect. 
     """
     # Apply age and BMI transformations
     data = data.with_row_index()
