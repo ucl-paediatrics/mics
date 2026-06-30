@@ -53,7 +53,6 @@ def calculate_qrisk3(data: pl.DataFrame) -> pl.Series:
     This function returns the 10 year risk of cardiovascular disease for each individual in the dataset, 
     as a percentage.
 
-    TODO: Implement statin effect. 
     """
     # Apply age and BMI transformations
     data = data.with_row_index()
@@ -285,7 +284,7 @@ def smoking_risk(data: pl.DataFrame) -> pl.Series:
         "Ex Smoker": 0.13386833786546262,
         "Light Smoker": 0.56200858012438537,
         "Moderate Smoker": 0.66749593377502547,
-        "Heavy Smoker": 0.84948177644830847
+        "Heavy Smoker": 0.84948177644830847 
     }
 
     risk_male = {
@@ -349,3 +348,7 @@ def ethnicity_risk(data: pl.DataFrame) -> pl.Series:
             data["Ethnicity"].replace(risk_female)
         ).alias("ethnicity_risk")
     )['ethnicity_risk'].cast(pl.Float64)
+
+# TODO: Create a function that wraps the statins intervention, the impact/effect of true risk on population B, at application of the RRR
+# TODO: Create a functio that applies the the RRR of the statins intervertion using a paramatic sytem, not hard encoding a value. 
+

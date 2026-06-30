@@ -7,10 +7,10 @@ import polars as pl
 
 # STEP 1: Create a simulated population of 100k patinets
 
-# STEP 2: Simulate patinet characteristics using literature based numbers
+# STEP 2: Simulate patient characteristics using literature based numbers
 # Yes = 1, No = 0
-# TODO: Need to gather the data sources/links for each of the risk factors.
-# TODO: Need to consider how to simulate the interdependencies between the risk factors?
+# TODO: Need to input the data sources/links for each of the risk factors values.
+# TODO: Need to consider how to simulate the realistic and relavent interdependencies between the risk factors?
 # TODO: Need to consider how to simulate the correlaations between the risk factors?
 def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     """Generate as simulated patient dataset containing variables from the QRISK3 algorithm, with n records.
@@ -100,8 +100,10 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     cholesterol_hdl_ratio = np.round(np.random.normal(4, 1, size=n).clip(1.5, 8), 2)
 
     #LIFESTYLE:
-    # Source: ONS Annual Population Survey 2024 (smoking status), 
+    # Source: ONS Annual Population Survey 2024 (smoking status),
     # combined with Health Survey for England trends in cigarettes/day for the intensity split.
+    # TODO: Add source link.
+    
     # Smoking status split into QRISK3's 5 categories 
     # QRISK3 intensity definitions: light <10/day, moderate 10-19/day, heavy >=20/day.
     # TODO: Age and sex dependencies 
@@ -223,7 +225,7 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     on_atypical_antipsychotics = np.random.choice([1, 0], size=n, p=[0.015, 0.985])
 
     # BP Medication: Around 21.9% of people in UK are on medication for high bp
-    # TODO: Probability increases with systolic blood pressure
+    # TODO: Probability of being on medication increases with systolic blood pressure; realistic relationships between input features 
     on_bp_medication = np.random.choice([1, 0], size=n, p=[0.219, 0.781])
 
     # FAMILY HISTORY:
@@ -317,3 +319,25 @@ def fit_model(X, y):
 
     model_1 = LogisticRegression(max_iter=2000).fit(X, y)
     return model_1
+
+def build_feature_matrix(patients):
+    """Build a one hot encoded feature matric for the logistic regression models.
+    
+    Args:
+    patients: polars dataframe from generate_patinets
+
+    Returns:
+    X: An array of shape (n_patients, n_features)
+    feature_names: list of column names in the same order as X's columns
+    """
+# Make a copy of the patients dataframe to avoid modifications to the original
+    matrix = patients.clone()
+
+# One-hot encode the categorical variables 
+# It turns each category into its own separate binary column (0/1)
+    matrix = matrix.to_dummies(columns=["Sex", "Ethnicity", "Smoking Status"])
+
+# Convert into numpy array for model fitting
+    X = matrix.to_numpy()
+    feature_names = matrix.columns
+    return X, feature_names
