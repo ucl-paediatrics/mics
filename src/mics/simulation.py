@@ -303,23 +303,7 @@ def risk_to_event(risk_pct: np.ndarray, random_seed: int):
     
     return y
 
-# STEP 4: Fit Model 1 (pre-treatment)
-
-def fit_model(X, y):
-    """Fit a logistic regression model on the patient features and outcomes.
-    
-    Args:
-    X: An array of patient features, shape (n_patients, n_features).
-    y: An array of binary outcomes, shape (n_patients,).
-
-    Returns:
-    model: A fitted LogisticRegression model.
-    """
-    from sklearn.linear_model import LogisticRegression
-
-    model_1 = LogisticRegression(max_iter=2000).fit(X, y)
-    return model_1
-
+ # STEP 4: Generate Feature Matrix for Model 1
 def build_feature_matrix(patients):
     """Build a one hot encoded feature matric for the logistic regression models.
     
@@ -341,3 +325,58 @@ def build_feature_matrix(patients):
     X = matrix.to_numpy()
     feature_names = matrix.columns
     return X, feature_names
+
+# STEP 5: Fit Model 1 (pre-treatment)
+
+def fit_model(X, y):
+    """Fit a logistic regression model on the patient features and outcomes.
+    
+    Args:
+    X: An array of patient features, shape (n_patients, n_features).
+    y: An array of binary outcomes, shape (n_patients,).
+
+    Returns:
+    model: A fitted LogisticRegression model.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    model_1 = LogisticRegression(max_iter=2000).fit(X, y)
+    return model_1
+
+# STEP 6: Produce Statin Intervention
+def apply_statin_intervention(patients_2, model_1, *, threshold=0.10, rrr=0.25, random_seed=None):
+    """Deploy M1 to predict the risk of CVD events in this new population and simulate the effect of statin intervention
+    
+    Args:
+    X: An array of patient features, shape (n_patients, n_features).
+    y: An array of binary outcomes, shape (n_patients,).
+
+    Returns:
+    model: A fitted LogisticRegression model.
+    """
+    # Build a new feature matrix for the new population
+    X_2, _ = build_feature_matrix(patients_2)
+
+    # M1 predicts the risk of the new population
+    predicted_risk_b = model_1.predict_proba(X_2)[:,1]
+
+    # NICE CG181 threshold: CVD predicted risk >= 10% triggers GP statin prescribing.
+    # M1 predicted_risk is on the 0-1 scale, so the threshold is 0.10
+    on_statins = predicted_risk_b >= threshold
+
+    # Calculate the true underlying risk for the new population using QRISK3.
+    # This is the ground truth risk; the underlying biological risk for each patient
+    # It can be used to evaluate how well M1 performed in this new population and is independent og M1's prediction
+    from mics import qrisk3
+    true_risk_b = qrisk3.calculate_qrisk3(patients_2).to_numpy()
+
+    #Statins have a CVD relative risk reduction (RRR) of approximately 25%
+    # They biologically lower the true probability of a CVD event in patients who are prescribed them
+
+    true_risk_post_b = true_risk_b.copy() # True risk modified for treated patients only
+    true_risk_post_b[on_statins] = true_risk_post_b[on_statins] * (1 - rrr) 
+
+    # Generate post-intervention ouctomes 
+    y_2 = risk_to_event(true_risk_post_b, random_seed=random_seed)
+
+    return X_2, y_2, on_statins, true_risk_b, true_risk_post_b
