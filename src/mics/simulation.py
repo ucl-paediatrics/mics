@@ -380,3 +380,39 @@ def apply_statin_intervention(patients_2, model_1, *, threshold=0.10, rrr=0.25, 
     y_2 = risk_to_event(true_risk_post_b, random_seed=random_seed)
 
     return X_2, y_2, on_statins, true_risk_b, true_risk_post_b
+
+# STEP 7: Compare Model 1 and Model 2 Coefficients (MICS Signal)
+def coefficients_comparison(model_1, model_2, feature_names, features=None):
+    """Compare the coefficients of the two logistic regression models across their features.
+    
+    Returns a polars DataFrame with one row per feature, showing M1's coefficient,
+    M2's coefficient, and the difference (M2 - M1). A negative difference on a
+    strong positive M1 coefficient is the signature of MICS: As M2 has learned a
+    weaker association between that feature and CVD events.
+
+    Args:
+    model_1: A fitted LogisticRegression model (pre-intervention).
+    model_2: A fitted LogisticRegression model (post-intervention).
+    feature_names: List of feature name strings, corresponding to the columns in the feature matrix.
+    features: Optional list of specific features names to include in the comparison. If None, all features are included.
+
+    Returns:
+    pl.DataFrame: A Polars DataFrame containing the features, the coefficients from both models and their differences.
+    """
+    # Extract the coefficients from both models
+    coef_1 = model_1.coef_[0]
+    coef_2 = model_2.coef_[0]
+
+    # Create a DataFrame for comparison
+    comparison_df = pl.DataFrame({
+        "Feature": feature_names,
+        "Model 1 Coefficient": coef_1,
+        "Model 2 Coefficient": coef_2,
+        "Difference (M2 - M1)": coef_2 - coef_1
+    })
+
+    # If certian features are specified, filter the DataFrame to include only those features
+    if features is not None:
+        comparison_df = comparison_df.filter(pl.col("Feature").is_in(features))
+
+    return comparison_df
