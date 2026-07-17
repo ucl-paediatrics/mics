@@ -2,6 +2,7 @@
 # Import all necessary coding libaries
 import numpy as np
 import polars as pl
+from sklearn.metrics import roc_curve
 
 #### MODEL 1 - Pre-treatment Simulation & Training ####
 
@@ -267,7 +268,7 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
         "Family History of CVD": family_history_cvd
         })
 
-# STEP 3: Simulate CVD outcomes 
+# STEP 3: Simulate CVD  Outcomes 
 # y = np.random.uniform(0, 1, n_patients) < (risk/100) - simple clean version
 def risk_to_event(risk_pct: np.ndarray, random_seed: int):
     """
@@ -314,7 +315,7 @@ def build_feature_matrix(patients):
     X: An array of shape (n_patients, n_features)
     feature_names: list of column names in the same order as X's columns
     """
-# Make a copy of the patients dataframe to avoid modifications to the original
+# Clone the patients dataframe to avoid modifying the original data structure
     matrix = patients.clone()
 
 # One-hot encode the categorical variables 
@@ -338,8 +339,6 @@ def fit_model(X, y):
     Returns:
     model: A fitted LogisticRegression model.
     """
-    from sklearn.linear_model import LogisticRegression
-
     model_1 = LogisticRegression(max_iter=2000).fit(X, y)
     return model_1
 
@@ -348,33 +347,36 @@ def apply_statin_intervention(patients_2, model_1, *, threshold=0.10, rrr=0.25, 
     """Deploy M1 to predict the risk of CVD events in this new population and simulate the effect of statin intervention
     
     Args:
-    X: An array of patient features, shape (n_patients, n_features).
-    y: An array of binary outcomes, shape (n_patients,).
+    patients_2: A Polars DataFrame of the new population cohort.
+    model_1: A trained pre-intervention scikit-learn model.
+    threshold: The decision line for clinical intervention (default 0.10 for NICE).
+    rrr: Relative Risk Reduction from treatment (0.25 = 25% reduction).
+    random_seed: The seed for outcome sampling reproducibility.
 
     Returns:
     model: A fitted LogisticRegression model.
     """
     # Build a new feature matrix for the new population
-    X_2, _ = build_feature_matrix(patients_2)
+    X_2, feature_names = build_feature_matrix(patients_2)
 
     # M1 predicts the risk of the new population
-    predicted_risk_b = model_1.predict_proba(X_2)[:,1]
+    predicted_risk_b = model_1.predict_proba(X_2)[:, 1]
 
     # NICE CG181 threshold: CVD predicted risk >= 10% triggers GP statin prescribing.
     # M1 predicted_risk is on the 0-1 scale, so the threshold is 0.10
     on_statins = predicted_risk_b >= threshold
 
     # Calculate the true underlying risk for the new population using QRISK3.
-    # This is the ground truth risk; the underlying biological risk for each patient
+    # This generates the ground truth risk; the underlying biological risk for each patient
     # It can be used to evaluate how well M1 performed in this new population and is independent og M1's prediction
     from mics import qrisk3
     true_risk_b = qrisk3.calculate_qrisk3(patients_2).to_numpy()
 
-    #Statins have a CVD relative risk reduction (RRR) of approximately 25%
+    # Statins have a CVD relative risk reduction (RRR) of approximately 25%
     # They biologically lower the true probability of a CVD event in patients who are prescribed them
 
     true_risk_post_b = true_risk_b.copy() # True risk modified for treated patients only
-    true_risk_post_b[on_statins] = true_risk_post_b[on_statins] * (1 - rrr) 
+    true_risk_post_b[on_statins] = true_risk_post_b[on_statins] * (1.0 - rrr) 
 
     # Generate post-intervention ouctomes 
     y_2 = risk_to_event(true_risk_post_b, random_seed=random_seed)
@@ -416,3 +418,37 @@ def coefficients_comparison(model_1, model_2, feature_names, features=None):
         comparison_df = comparison_df.filter(pl.col("Feature").is_in(features))
 
     return comparison_df
+
+# STEP 8: Generate ROC & AUC curves for boths models on Populatiopn C to compare discrimination 
+def plot_roc_curve(y_true, y_prob, label=None):
+    """Plot ROC curves for both models and calculate AUC scores.
+    
+    Args:
+    y_true: An arry of true binary outcomes for the population.
+    y_prob: An array of predicted probabilities from the model.
+    
+    Returns:
+    None
+    """
+    import matplotlib.pyplot as plt
+
+    # Generate the ROC curves for both models on population C based on the probabilities predicted by each model
+    fpr, tpr, roc_thresholds = roc_curve(y_true, y_prob)
+
+    # Produce a precision-recall curve for both models on population C based on the probabilities predicted by each model
+    precision, recall, pr_thresholds = precision_recall_curve(y_true, y_prob)
+
+    # Generate the ßAUC score for both models on population C based on the probabilities predicted by each model
+    auc_roc = roc_auc_score(y_true, y_prob)
+    auc_pr = average_precision_score(y_true, y_prob)
+
+    # Plot the ROC curve
+    curve_label = f"{label} (AUC = {auc_roc:.4f})" if label else f"AUC = {auc_roc:.4f}"
+    plt.plot(fpr, tpr, label=curve_label)
+    plt.xlabel('False Positive Rate (FPR)')
+    plt.ylabel('True Positive Rate (TPR)')
+
+    # Print AUC and ROC curve values for both models
+    # print(f"{label} AUC: {auc_roc:.4f}" if label else f"AUC: {auc_roc:.4f}")
+    print(f"ROC-AUC: {auc_roc:.4f} | PR-AUC (AP): {auc_pr:.4f}")
+    print(f"{label} ROC Curve: FPR = {fpr}, TPR = {tpr}" if label else f"ROC Curve: FPR = {fpr}, TPR = {tpr}")
