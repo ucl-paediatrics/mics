@@ -1,9 +1,16 @@
 """Generate a simulated patient dataset containing variables from the QRISK3 algorithm."""
 # Import all necessary coding libaries
+from cProfile import label
+
+from altair import value
 import numpy as np
 import polars as pl
-from sklearn.metrics import roc_curve
-
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_curve, roc_auc_score, confusion_matrix, f1_score
+from sklearn.metrics import precision_recall_curve, average_precision_score
+import matplotlib.pyplot as plt
+from mics import qrisk3
+                           
 #### MODEL 1 - Pre-treatment Simulation & Training ####
 
 # STEP 1: Create a simulated population of 100k patinets
@@ -11,8 +18,11 @@ from sklearn.metrics import roc_curve
 # STEP 2: Simulate patient characteristics using literature based numbers
 # Yes = 1, No = 0
 # TODO: Need to input the data sources/links for each of the risk factors values.
-# TODO: Need to consider how to simulate the realistic and relavent interdependencies between the risk factors?
-# TODO: Need to consider how to simulate the correlaations between the risk factors?
+
+# Population deprivation is represented by a shared latent variable so BMI,
+# blood pressure, and (indirectly) type 2 diabetes retain realistic positive
+# associations with Townsend deprivation.
+
 def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     """Generate as simulated patient dataset containing variables from the QRISK3 algorithm, with n records.
     
@@ -62,8 +72,8 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     # Standardised so the national mean is 0, negative scores = less deprived, positive scores = more deprived
     # It is sampled independently here with a mean of 0 and SD of 3.3, representative of real UK scores.
     # Real Townsend is right-skewed and correlates with smoking, ethnicity, BMI.
-    # TODO: revisit once population-correlation strategy is agreed with supervisor.
-    townsend_score = np.random.normal(0, 3.3, size=n).clip(-7, 11)
+    deprivation = np.random.normal(size=n)
+    townsend_score = (3.3 * deprivation).clip(-7, 11)
 
     # CLINICAL MEASUREMENTS:
 
@@ -71,7 +81,7 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     # Generate normally distributed BMI values - allows for realistic BMI variation across the population
     # with most values clustering around the mean 
     # and fewer values being derived from potentially extreme/unrealistic w/h combinations
-    bmi = np.round(np.random.normal(27, 3, size=n),2) # mean =27, sd =3
+    bmi = np.round(np.random.normal(27 + (0.75 * deprivation), 3, size=n),2)
     
     # Systolic Blood Pressure: UK ideal blood pressure is 120 mmHg
     # Average blood pressure can increase with age
@@ -80,7 +90,9 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     # Using a minimum of 3 sbp readings to calculate the SD_SBP
     # Literatures states 2 or more readings are needed
     # scale=10 allows for sbp values vary by 10 from the patients baseline with each different reading
-    underlying_sbp = np.random.normal(120 + (0.2 * ages), scale=10, size=n)
+    underlying_sbp = np.random.normal(
+        120 + (0.2 * ages) + (2.0 * deprivation), scale=10, size=n
+    )
     noise = np.random.normal(0, 5, size=(n,3)) # 3 readings per patient
     # Add noise to the underlying sbp to get the three readings
     collated_readings = underlying_sbp[:, np.newaxis] + noise
@@ -226,7 +238,9 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     on_atypical_antipsychotics = np.random.choice([1, 0], size=n, p=[0.015, 0.985])
 
     # BP Medication: Around 21.9% of people in UK are on medication for high bp
-    # TODO: Probability of being on medication increases with systolic blood pressure; realistic relationships between input features 
+    # TODO: Probability of being on medication should increase with systolic blood pressure; 
+    # requires a realistic relationship between the input features, as it is currently independent
+
     on_bp_medication = np.random.choice([1, 0], size=n, p=[0.219, 0.781])
 
     # FAMILY HISTORY:
@@ -268,7 +282,7 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
         "Family History of CVD": family_history_cvd
         })
 
-# STEP 3: Simulate CVD  Outcomes 
+# STEP 3: Simulate CVD Outcomes 
 # y = np.random.uniform(0, 1, n_patients) < (risk/100) - simple clean version
 def risk_to_event(risk_pct: np.ndarray, random_seed: int):
     """
@@ -322,6 +336,23 @@ def build_feature_matrix(patients):
 # It turns each category into its own separate binary column (0/1)
     matrix = matrix.to_dummies(columns=["Sex", "Ethnicity", "Smoking Status"])
 
+# Drop one reference level per categorical variable to avoid multicollinearity in the logistic regression model
+# Polars keeps all k, which makes the dummy block collinear with the intercept and the coefficients remain uninterpretable. 
+# Dropping one level per categorical variable ensures that the model can be fit and the coefficients can be interpreted as differences from the reference category.
+# Reference categories are chosen for clinical interpretability:
+# every coefficient now reads as a difference from the three largest groups; matching the QRISK3 baselines.
+    reference_columns = ["Sex_Female", "Ethnicity_White", "Smoking Status_Non-Smoker"]
+
+# Guard against silently missing reference columns in the feature matrix, which would indicate a problem with the one-hot encoding or the input data.
+    missing = []
+    for col in reference_columns:
+        if col not in matrix.columns:
+            missing.append(col)
+        if missing:
+         raise ValueError(f"Expected reference columns missing from feature matrix: {missing}")
+    
+    matrix = matrix.drop(reference_columns)
+
 # Convert into numpy array for model fitting
     X = matrix.to_numpy()
     feature_names = matrix.columns
@@ -339,11 +370,15 @@ def fit_model(X, y):
     Returns:
     model: A fitted LogisticRegression model.
     """
-    model_1 = LogisticRegression(max_iter=2000).fit(X, y)
+    # As sklearn defaults to L2 regularisation, which shrinks by an amount specific to each model's data and breaks M1 $ M2  coeficinent comparability
+    # We explicitly set C=np.inf as it gives ab unpenalised fit. 
+    # Sklean regularises by default, which would shrink the M1 and M2 coefficients by different amounts, making them not directly comparable.
+    
+    model_1 = LogisticRegression(C=np.inf, max_iter=2000).fit(X, y)
     return model_1
 
 # STEP 6: Produce Statin Intervention
-def apply_statin_intervention(patients_2, model_1, *, threshold=0.10, rrr=0.25, random_seed=None):
+def apply_statin_intervention(patients_2, model_1, *, threshold=0.10, rrr=0.25, uptake=1.0, statin_covariate=False, random_seed: int, uptake_seed: int):
     """Deploy M1 to predict the risk of CVD events in this new population and simulate the effect of statin intervention
     
     Args:
@@ -352,6 +387,12 @@ def apply_statin_intervention(patients_2, model_1, *, threshold=0.10, rrr=0.25, 
     threshold: The decision line for clinical intervention (default 0.10 for NICE).
     rrr: Relative Risk Reduction from treatment (0.25 = 25% reduction).
     random_seed: The seed for outcome sampling reproducibility.
+    uptake: Proportion of eligible patients who accept treatment 
+    (1.0 = full adherence, mathcing the derterministic allocation used in Experiment 1)
+    uptake_seed: seed for the acceptance draw, keot seperate from the random_seed,
+    so the uptake and outcome draws don't share the same random stream
+    statin_covariate: This makes the treatmnet a covariate which should partially restore
+    accuracy by conditioning predictions on intervention exposure. 
 
     Returns:
     model: A fitted LogisticRegression model.
@@ -364,25 +405,45 @@ def apply_statin_intervention(patients_2, model_1, *, threshold=0.10, rrr=0.25, 
 
     # NICE CG181 threshold: CVD predicted risk >= 10% triggers GP statin prescribing.
     # M1 predicted_risk is on the 0-1 scale, so the threshold is 0.10
-    on_statins = predicted_risk_b >= threshold
+    eligible = predicted_risk_b >= threshold
 
+    # Generate the per-patient uptake array 
+    if isinstance (uptake, dict):
+        # Map the original ethnicity column through the dict using replace_strict
+        uptake_per_patient = patients_2["Ethnicity"].replace_strict(uptake).to_numpy()
+    else:
+        # Broadcast the scalar float to match the population size
+        uptake_per_patient = np.full(len(predicted_risk_b), float(uptake))
+
+    # Bernoulli acceptance draw using the per-patinet uptake array.
+    # A patient is treated only if eligible and accepting, so 1.0 reproduces full adherence to treatment
+    rng = np.random.default_rng(uptake_seed)
+    accepts_statins = rng.random(len(predicted_risk_b)) < uptake_per_patient
+    on_statins = eligible & accepts_statins
+
+    # Rebuild the feature matrix with treatmnet status included as a feature 
+    # Must be after on_statins so that M1 can predict risk and the threshold can be applied 
+    # This builds a wider matrix that only M2 uses as M1 was trained on a different number for features
+    if statin_covariate:
+        patients_2 = patients_2.with_columns(
+            pl.Series("On_Statins", on_statins.astype(int))
+        )
+        X_2, feature_names = build_feature_matrix(patients_2)
+        
     # Calculate the true underlying risk for the new population using QRISK3.
     # This generates the ground truth risk; the underlying biological risk for each patient
     # It can be used to evaluate how well M1 performed in this new population and is independent og M1's prediction
-    from mics import qrisk3
     true_risk_b = qrisk3.calculate_qrisk3(patients_2).to_numpy()
 
     # Statins have a CVD relative risk reduction (RRR) of approximately 25%
     # They biologically lower the true probability of a CVD event in patients who are prescribed them
-
     true_risk_post_b = true_risk_b.copy() # True risk modified for treated patients only
     true_risk_post_b[on_statins] = true_risk_post_b[on_statins] * (1.0 - rrr) 
 
     # Generate post-intervention ouctomes 
     y_2 = risk_to_event(true_risk_post_b, random_seed=random_seed)
 
-    return X_2, y_2, on_statins, true_risk_b, true_risk_post_b
-
+    return X_2, y_2, on_statins, true_risk_b, true_risk_post_b, feature_names, uptake_per_patient
 # STEP 7: Compare Model 1 and Model 2 Coefficients (MICS Signal)
 def coefficients_comparison(model_1, model_2, feature_names, features=None):
     """Compare the coefficients of the two logistic regression models across their features.
@@ -419,7 +480,7 @@ def coefficients_comparison(model_1, model_2, feature_names, features=None):
 
     return comparison_df
 
-# STEP 8: Generate ROC & AUC curves for boths models on Populatiopn C to compare discrimination 
+# STEP 8: Generate ROC & AUC curve for boths models on Populatiopn C to compare discrimination 
 def plot_roc_curve(y_true, y_prob, label=None):
     """Plot ROC curves for both models and calculate AUC scores.
     
@@ -430,25 +491,328 @@ def plot_roc_curve(y_true, y_prob, label=None):
     Returns:
     None
     """
-    import matplotlib.pyplot as plt
 
     # Generate the ROC curves for both models on population C based on the probabilities predicted by each model
     fpr, tpr, roc_thresholds = roc_curve(y_true, y_prob)
 
-    # Produce a precision-recall curve for both models on population C based on the probabilities predicted by each model
-    precision, recall, pr_thresholds = precision_recall_curve(y_true, y_prob)
-
-    # Generate the ßAUC score for both models on population C based on the probabilities predicted by each model
-    auc_roc = roc_auc_score(y_true, y_prob)
-    auc_pr = average_precision_score(y_true, y_prob)
-
+    # Generate the AUC score for both models on population C based on the probabilities predicted by each model
+    auc  = roc_auc_score(y_true, y_prob)
+    
     # Plot the ROC curve
-    curve_label = f"{label} (AUC = {auc_roc:.4f})" if label else f"AUC = {auc_roc:.4f}"
+    curve_label = f"{label} (AUC = {auc:.4f})" if label else f"AUC = {auc:.4f}"
     plt.plot(fpr, tpr, label=curve_label)
     plt.xlabel('False Positive Rate (FPR)')
     plt.ylabel('True Positive Rate (TPR)')
 
     # Print AUC and ROC curve values for both models
     # print(f"{label} AUC: {auc_roc:.4f}" if label else f"AUC: {auc_roc:.4f}")
-    print(f"ROC-AUC: {auc_roc:.4f} | PR-AUC (AP): {auc_pr:.4f}")
-    print(f"{label} ROC Curve: FPR = {fpr}, TPR = {tpr}" if label else f"ROC Curve: FPR = {fpr}, TPR = {tpr}")
+    print(f"{label} ROC-AUC: {auc:.4f}" if label else f"ROC-AUC: {auc:.4f}")
+    
+# STEP 9: Generate Precision-Recall Curve for both models on Population C; which focuses on the minority class (CVD events)
+def plot_pr_curve(y_true, y_prob, label=None):
+    """Plot a precision-recall curve for both models.
+    
+    Args:
+    y_true: An arry of true binary outcomes for the population.
+    y_prob: An array of predicted probabilities from the model.
+    
+    Returns:
+    None
+    """
+
+    # Produce a precision-recall curve for both models on population C based on the probabilities predicted by each model
+    precision, recall, _ = precision_recall_curve(y_true, y_prob)
+    pr_auc = average_precision_score(y_true, y_prob)
+
+    # Plot the precision-recall curve
+    curve_label = f"{label} (PR-AUC = {pr_auc:.4f})" if label else f"PR-AUC = {pr_auc:.4f}"
+    plt.plot(recall, precision, label=curve_label)
+    plt.xlabel("Recall (Sensitivity)")
+    plt.ylabel("Precision (PPV)")
+
+    print(f"{label} PR-AUC: {pr_auc:.4f}" if label else f"PR-AUC: {pr_auc:.4f}")
+
+# STEP 10: Evaluate a model's prediction on Population C
+def evaluate_predictions(y_true, predicted_risk, true_risk_pct, prefix, *, threshold=0.10):
+    """Calculate performance metrics for a model's predictions on Population C.
+    
+    Args:
+    y_true: The true binary outcomes for the evaluation population
+    predicted_risk: The predicted probabilities from one model
+    true_risk_pct: True QEISK3 risk for the same patients
+    prefix: A string added to each key to start the metric names
+    threshold: The predicted risk at which the statins were allocated
+
+    Returns:
+    dict: Conytains the performance metrics prefixed by the model with the float values
+    """
+    metrics = {}
+
+    # Guard against division by zero, which can occur at higher thresholds if a model has very few patients
+    #The safe divide is a nested function to avoid division by zero errors when calculating metrics
+    # It returns NaN which helps stop one odd cell form killing the entire experiment loop
+    def safe_divide(numerator, denominator):
+            return float(numerator / denominator) if denominator != 0 else float("nan")
+    
+
+    # 1. Discrimination: ROC-AUC and PR-AUC
+    # These measure ranking rather than absolute risk, 
+    # so they use the continuous probabilities rather than binary predictions 
+    metrics[f"{prefix}_auc"] = float(roc_auc_score(y_true, predicted_risk))
+    metrics[f"{prefix}_pr_auc"] = float(average_precision_score(y_true, predicted_risk))
+
+    # 2. Threshold-based metrics: Sensitivity, Specificity, PPV, NPV, F1 Score
+    # Convert the probabilities into binary predictions based on the clinical threshold
+    y_pred = (predicted_risk >= threshold).astype(int)
+
+    # Confusion matrix retuns [[tn, fp], [fn, tp]]
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    
+    metrics[f"{prefix}_sensitivity"] = safe_divide(tp, tp + fn)
+    metrics[f"{prefix}_specificity"] = safe_divide(tn, tn + fp)
+    metrics[f"{prefix}_ppv"] = safe_divide(tp, tp + fp)
+    metrics[f"{prefix}_npv"] = safe_divide(tn, tn + fn)
+    metrics[f"{prefix}_f1"] = float(f1_score(y_true, y_pred, zero_division=0))
+
+    # 3. Number of patients flagged for statin allocation based on the threshold
+    metrics[f"{prefix}_n_flagged"] = int(tp + fp)
+
+    # 4. Underprediction among genuinely high-risk patinets 
+    # Patinets are selected based on thier true QRISK3 risk, rather than the model's prediction
+    # So both models are compared on the same people (boolean indexing)
+    truely_high_risk = true_risk_pct >= (threshold * 100)  # Converts the threshold to percentage for comparison
+
+    metrics[f"{prefix}_n_truely_high_risk"] = int(truely_high_risk.sum())
+    metrics[f"{prefix}_mean_pred_high_risk"] = float(predicted_risk[truely_high_risk].mean())
+
+    return metrics
+
+
+# Step 11: Generate the three populations, fit both models , predict on C 
+def run_pipeline(seed, n=100_000, *, threshold=0.10, rrr=0.25, uptake=1.0, statin_covariate=False, covariate_value="zeros"):
+    """Run the MICS simulation pipeline and return the models and per-patient arrays.
+    
+    Args:
+    seed: All six random draws are derived from this single seed, so a run is reproducible
+        from one number
+    n: Number of patients in each population
+    threshold: The predicted risk at which statins are allocated (NICE CG181 = 0.10)
+    rrr: Relative risk reduction from statins (0.25 = 25%)
+    covariate_value: This provides the covariate value if statins have been allocated 
+    
+    Returns:
+    dict: Both fitted models, feature names, treatment allocation, 
+        and the outcomes Run settings, true risks and predictions for population C 
+        
+    """
+    # Derive independent seeds from the single input seed so the whole run is
+    # reproducible from a single number. 
+    # Outcome sampling needs its own seeds too, since risk_to_event resets the global numpy seed.
+    seed_pop_a, seed_pop_b, seed_pop_c = seed, seed + 1000, seed + 2000
+    seed_out_a, seed_outs_b, seed_out_c = seed + 3000, seed + 4000, seed + 5000
+
+    # A distinct seed offset for the non-colliding uptake draw 
+    seed_uptake = seed + 6000
+
+    # Population A: Train M1 on pre-intervention outcomes 
+    patients_a = generate_patients(n, random_seed=seed_pop_a)
+    true_risk_a = qrisk3.calculate_qrisk3(patients_a).to_numpy()
+    y_a = risk_to_event(true_risk_a, random_seed=seed_out_a)
+    X_a, feature_names = build_feature_matrix(patients_a)
+    model_1 = fit_model(X_a, y_a)
+
+    # Population B: Allocate statins, train M2 on post-intervention data 
+    # apply_statin_intervention which builds the matrix, deploys M1, allocates statins above the threshold,
+    # which reduces the treated patinets true risk by the RRR 
+    patients_b = generate_patients(n, random_seed=seed_pop_b)
+    X_b, y_b, on_statins, true_risk_b, true_risk_post_b, feature_names_b, uptake_per_patient = apply_statin_intervention(
+        patients_b, model_1, threshold=threshold, rrr=rrr, random_seed=seed_outs_b, 
+        uptake=uptake, uptake_seed=seed_uptake, statin_covariate=statin_covariate,
+        )
+    model_2 = fit_model(X_b, y_b)
+
+    # Population C: Evaluate both models on the untreated outcomes - no intervention and no model is fitted
+    patients_c = generate_patients(n, random_seed=seed_pop_c)
+
+    # M1 was trained without a statin column, so it always predicts on this
+    # narrower matrix regardless of the covariate setting
+    X_c_m1, feature_names_c = build_feature_matrix(patients_c)
+
+    if statin_covariate: 
+        if covariate_value == "zeros":
+            # No-one in population C has been allocated, so setting the covariate 
+            # to zero causes M2 to generate each patinet's untreated risk 
+            statin_column = np.zeros(n, dtype=int)
+        else:
+            raise ValueError(f"Unknown covariate_value: {covariate_value}")
+        patients_c_with_statins = patients_c.with_columns(pl.Series("On_Statins", statin_column))
+
+        # Build a new feature matrix that seperates both the M1 and M2 dataframes
+        # M2's matrix is now wider by the On_Statins column. M1 was trained on the
+        # narrower one and cannot predict on a matrix with more features.
+        X_c_m2, _ = build_feature_matrix(patients_c_with_statins)
+    else: 
+        X_c_m2 = X_c_m1
+    
+
+    if feature_names_c != feature_names:
+        raise ValueError("Feature names differ between populations A and C.")
+
+    true_risk_c = qrisk3.calculate_qrisk3(patients_c).to_numpy()
+    y_c = risk_to_event(true_risk_c, random_seed=seed_out_c)
+
+    return{
+        "model_1": model_1,
+        "model_2": model_2,
+        "feature_names": feature_names,
+        "feature_names_b": feature_names_b,
+        "on_statins": on_statins,
+        "true_risk_c": true_risk_c,
+        "y_c": y_c,
+        "uptake_per_patient": uptake_per_patient,
+        "ethnicity_b": patients_b["Ethnicity"].to_numpy(),
+        "ethnicity_c": patients_c["Ethnicity"].to_numpy(),
+        "m1_predicted_risk_c":model_1.predict_proba(X_c_m1)[:, 1],
+        "m2_predicted_risk_c": model_2.predict_proba(X_c_m2)[:, 1],
+
+    }
+
+# Step 12: Run one complete simulation and return a flat dictionary of results
+def run_simulation(seed, n=100_000, *, threshold=0.10, rrr=0.25, uptake=1.0, statin_covariate=False, covariate_value="zeros"):
+    """Run one complete MICS simulation and return the results as a dictionary.
+
+    M1 is trained on an untreated population (A), then deployed on a second
+    population (B) which is used to allocate statins, 
+    which lowers the true risk of treated patients.
+    M2 is trained on those post-intervention outcomes. Both models
+    are evaluated on an untreated third population (C), so any difference
+    between them comes from the intervention rather than from the patients.
+
+    Args:
+    seed: All six random draws are derived from this single seed, so a run is reproducible
+        from one number
+    n: Number of patients in each population
+    threshold: The predicted risk at which statins are allocated (NICE CG181 = 0.10)
+    rrr: Relative risk reduction from statins (0.25 = 25%)
+
+    Returns:
+    dict: Contains the run settings, proportion treated, actual event rate in population C,
+        both models' mean predicted risk, the under-prediction gaps in
+        percentage points, both models' coefficients, and the metrics
+    """
+
+    pipeline_output = run_pipeline(seed, n, threshold=threshold, rrr=rrr, uptake=uptake, 
+                                   statin_covariate=statin_covariate, covariate_value=covariate_value,
+                                )
+
+    model_1 = pipeline_output["model_1"]
+    model_2 = pipeline_output["model_2"]
+    feature_names = pipeline_output["feature_names"]
+    feature_names_b = pipeline_output["feature_names_b"]
+    on_statins = pipeline_output["on_statins"]
+    true_risk_c = pipeline_output["true_risk_c"]
+    y_c = pipeline_output["y_c"]
+    m1_predicted_risk_c = pipeline_output["m1_predicted_risk_c"]
+    m2_predicted_risk_c = pipeline_output["m2_predicted_risk_c"]
+    uptake_per_patient = pipeline_output["uptake_per_patient"]
+    ethnicity_b = pipeline_output["ethnicity_b"]
+    ethnicity_c = pipeline_output["ethnicity_c"]
+
+    m1_metrics = evaluate_predictions(
+        y_c, m1_predicted_risk_c, true_risk_c, "m1", threshold=threshold
+    )
+    m2_metrics = evaluate_predictions(
+        y_c, m2_predicted_risk_c, true_risk_c, "m2", threshold=threshold
+    )
+
+    # Results:
+    # QRISK3 returns risk scores as percentages (0-100), predict_proba returns proportions(0-1), 
+    # so divide the true risks by 100 to keep one consistent scale throughout
+    actual_c = float(y_c.mean())
+    m1_mean_c = float(m1_predicted_risk_c.mean())
+    m2_mean_c = float(m2_predicted_risk_c.mean())
+
+    # Multiply by 100 to express the gaps in percentage points
+    underprediction_vs_truth_pp = (actual_c - m2_mean_c) * 100
+    m1_m2_pp_gap = (m1_mean_c - m2_mean_c) * 100
+
+    # One key per feature per model.
+    # The feature names and coefficients share the same column order, 
+    # so they are zipped together into pairs so that each feature has a corresponding 
+    # coefficient for easy interpretation.
+    m1_coefficients = {f"m1_coefficient_{name}": float(coef)
+                       for name, coef in zip(feature_names, model_1.coef_[0])}
+    m2_coefficients = {f"m2_coefficient_{name}": float(coef) 
+                       for name, coef in zip(feature_names_b, model_2.coef_[0])}
+
+    # Experiment 4 per-group results. Ethnicity is one-hot encoded in the feature matrix, 
+    # so the raw column is carried through from run_pipeline to allow the patients to be grouped
+    subgroup_results = {}
+    
+    for group in np.unique(ethnicity_c): # Returns the nine ethnicity names present in the population
+        # Populations B and C contain different patients, so each needs its
+        # own selection built from its own ethnicity array
+        group_patients_b = ethnicity_b == group
+        group_patients_c = ethnicity_c == group
+
+        subgroup_results[f"n_{group}"] = int(group_patients_c.sum())
+        subgroup_results[f"treated_{group}"] = float(on_statins[group_patients_b].mean())
+        subgroup_results[f"m1_mean_pred_{group}"] = float(m1_predicted_risk_c[group_patients_c].mean())
+        subgroup_results[f"m2_mean_pred_{group}"] = float(m2_predicted_risk_c[group_patients_c].mean())
+
+    results = {"seed": seed, "n": n, "threshold": threshold, "rrr": rrr, "uptake_type": "differential" if isinstance(uptake, dict) else "uniform",
+    "uptake_mean": float(uptake_per_patient.mean()) if isinstance(uptake, dict) else float(uptake),
+               "proportion_treated": float(on_statins.mean()),
+               "event_rate_c": actual_c,
+               "m1_mean_c": m1_mean_c, 
+               "m2_mean_c": m2_mean_c,
+               "underprediction_vs_truth_pp": underprediction_vs_truth_pp,
+               "m1_m2_pp_gap": m1_m2_pp_gap,
+               # M2's under-prediction is partly due to a baseline shift, not only model attenuataion. 
+               # Part of the shift lives in the intercept rather than in the coefficients, so it is stored alongside the coefficients
+               # so the shift can be separated from the attenuation.
+               "m1_intercept": float(model_1.intercept_[0]),
+               "m2_intercept": float(model_2.intercept_[0]),      
+ 
+    }
+    # Add the coefficients keys into to the results dictionary, keeping them flat and easily accessible for analysis.
+    results.update(m1_coefficients)
+    results.update(m2_coefficients)
+    results.update(m1_metrics)
+    results.update(m2_metrics)
+    results.update(subgroup_results)
+
+    return results
+
+# STEP 13: Generate the caliabration coodrinates for a population C plot
+def calibration_points(y_true, predicted_risk, n_bins=10):
+    """Return the mean predicted risk and observed event rate per deciles
+
+    Patients are sorted by thier predicted risk and placed into equal-sized bins.
+    Equal-sized bins are used rather than equal-width because predicted risk
+    has a heavily skewed distribution, which would leave the highest-risk bins nearly empty.
+    
+    Args: 
+    y_true: The binary outcomes for the evaluation population
+    predicted_risk: The predicted probabilities from one model 
+    n_bins: Number of bins, 10 produces deciles 
+
+    Returns:
+    mean_predicted: Mean predicted risk in each bin
+    observed_rate: Proportion of patients with an event in each bin
+    """
+
+    # Sort pateints by thier predicted risk
+    sort_patients = np.argsort(predicted_risk)
+    predicted_sorted = predicted_risk[sort_patients]
+    y_sorted = y_true[sort_patients]
+
+    # Cut the predicted patients into 10 equal-sized bins
+    predicted_bins = np.array_split(predicted_sorted, n_bins)
+    y_bins = np.array_split(y_sorted, n_bins)
+
+    # For each bin generate the mean predicted rosk and the actual proportion of patients with events 
+    mean_predicted = np.array([bin.mean() for bin in predicted_bins])
+    observed_rate = np.array([bin.mean() for bin in y_bins])
+
+    return mean_predicted, observed_rate
