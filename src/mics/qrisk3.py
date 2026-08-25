@@ -348,7 +348,3 @@ def ethnicity_risk(data: pl.DataFrame) -> pl.Series:
             data["Ethnicity"].replace(risk_female)
         ).alias("ethnicity_risk")
     )['ethnicity_risk'].cast(pl.Float64)
-
-# TODO: Create a function that wraps the statins intervention, the impact/effect of true risk on population B, at application of the RRR
-# TODO: Create a functio that applies the the RRR of the statins intervertion using a paramatic sytem, not hard encoding a value. 
-
