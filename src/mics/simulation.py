@@ -1,8 +1,5 @@
 """Generate a simulated patient dataset containing variables from the QRISK3 algorithm."""
 # Import all necessary coding libaries
-from cProfile import label
-
-from altair import value
 import numpy as np
 import polars as pl
 from sklearn.linear_model import LogisticRegression
@@ -19,9 +16,11 @@ from mics import qrisk3
 # Yes = 1, No = 0
 # TODO: Need to input the data sources/links for each of the risk factors values.
 
-# Population deprivation is represented by a shared latent variable so BMI,
-# blood pressure, and (indirectly) type 2 diabetes retain realistic positive
-# associations with Townsend deprivation.
+# LIMITATION: Risk factors are generated independently, apart from the explicit age dependencies below. 
+# Real primary care populations have substantial correlation between BMI, blood pressure, diabetes and deprivation. 
+# This does not bias the MICS comparison, since M1 and M2 face populations with identical
+# structure, but it does limit external realism. Modelling these interdependencies offers scope for future work 
+# on how correlation between risk factors affects the MICS effect.
 
 def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     """Generate as simulated patient dataset containing variables from the QRISK3 algorithm, with n records.
@@ -72,16 +71,15 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     # Standardised so the national mean is 0, negative scores = less deprived, positive scores = more deprived
     # It is sampled independently here with a mean of 0 and SD of 3.3, representative of real UK scores.
     # Real Townsend is right-skewed and correlates with smoking, ethnicity, BMI.
-    deprivation = np.random.normal(size=n)
-    townsend_score = (3.3 * deprivation).clip(-7, 11)
+    # This has been left independent by design as per the limitations.
+    townsend_score = np.random.normal(0, 3.3, size=n).clip(-7, 11)
 
     # CLINICAL MEASUREMENTS:
-
     # BMI:
     # Generate normally distributed BMI values - allows for realistic BMI variation across the population
     # with most values clustering around the mean 
     # and fewer values being derived from potentially extreme/unrealistic w/h combinations
-    bmi = np.round(np.random.normal(27 + (0.75 * deprivation), 3, size=n),2)
+    bmi = np.round(np.random.normal(27, 3, size=n),2) # mean =27, sd =3
     
     # Systolic Blood Pressure: UK ideal blood pressure is 120 mmHg
     # Average blood pressure can increase with age
@@ -90,9 +88,7 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     # Using a minimum of 3 sbp readings to calculate the SD_SBP
     # Literatures states 2 or more readings are needed
     # scale=10 allows for sbp values vary by 10 from the patients baseline with each different reading
-    underlying_sbp = np.random.normal(
-        120 + (0.2 * ages) + (2.0 * deprivation), scale=10, size=n
-    )
+    underlying_sbp = np.random.normal(120 + (0.2 * ages), scale=10, size=n)
     noise = np.random.normal(0, 5, size=(n,3)) # 3 readings per patient
     # Add noise to the underlying sbp to get the three readings
     collated_readings = underlying_sbp[:, np.newaxis] + noise
@@ -119,7 +115,6 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     
     # Smoking status split into QRISK3's 5 categories 
     # QRISK3 intensity definitions: light <10/day, moderate 10-19/day, heavy >=20/day.
-    # TODO: Age and sex dependencies 
     uk_smoking_status = {
         "Non-Smoker": 0.635,
         "Ex Smoker": 0.260,
@@ -136,7 +131,6 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     )
 
     # MEDICAL CONDITIONS:
-
     # Type 2 Diabetes: About 8% of adults in the UK are diagnosed with it.
     # the probability of developing it increases with age and is dependent on BMI
     # Type 1 Diabetes: Is a rare occurance, about 1% of adults in the UK are diagnosed. It is independent of age.
@@ -204,7 +198,7 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
         status = np.random.choice([1, 0], p=[af_prob, 1 - af_prob], size=1)[0]
         atrial_fibrillation.append(status)
 
-    # Rheumatoid arthritis: 1% prevalence in UK population
+    # Rheumatoid Arthritis: 1% prevalence in UK population
     rheumatoid_arthritis = np.random.choice([1, 0], size=n, p=[0.01, 0.99])
 
     # Systemic Lupus Erythematosus (SLE): 0.1% prevalence in the UK population
@@ -230,7 +224,6 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     )
 
     # MEDICATIONS:
-
     # Corticosteroids: Around 1% of adults in the UK are currently using them
     on_corticosteroids = np.random.choice([1, 0], size=n, p=[0.01, 0.99])
 
@@ -244,7 +237,6 @@ def generate_patients(n:int, random_seed:int)-> pl.DataFrame:
     on_bp_medication = np.random.choice([1, 0], size=n, p=[0.219, 0.781])
 
     # FAMILY HISTORY:
-
     # Family history of CVD: Approximately 37% of people have a close relative who had
     # a heart attack or angina before age 60
     family_history_cvd =  np.random.choice([1, 0], size=n, p=[0.37, 0.63])
@@ -318,7 +310,7 @@ def risk_to_event(risk_pct: np.ndarray, random_seed: int):
     
     return y
 
- # STEP 4: Generate Feature Matrix for Model 1
+# STEP 4: Generate Feature Matrix for Model 1
 def build_feature_matrix(patients):
     """Build a one hot encoded feature matric for the logistic regression models.
     
@@ -336,11 +328,11 @@ def build_feature_matrix(patients):
 # It turns each category into its own separate binary column (0/1)
     matrix = matrix.to_dummies(columns=["Sex", "Ethnicity", "Smoking Status"])
 
-# Drop one reference level per categorical variable to avoid multicollinearity in the logistic regression model
-# Polars keeps all k, which makes the dummy block collinear with the intercept and the coefficients remain uninterpretable. 
-# Dropping one level per categorical variable ensures that the model can be fit and the coefficients can be interpreted as differences from the reference category.
-# Reference categories are chosen for clinical interpretability:
-# every coefficient now reads as a difference from the three largest groups; matching the QRISK3 baselines.
+# Drop one reference level per categorical variable to avoid multicollinearity
+# Polars keeps all k levels, which makes the dummy block collinear with the intercept and 
+# the coefficients remain uninterpretable. 
+# The reference categorie are the largest group in each variable, so every coefficient now reads 
+# as the difference from that baseline; matching the QRISK3's own reference groups.
     reference_columns = ["Sex_Female", "Ethnicity_White", "Smoking Status_Non-Smoker"]
 
 # Guard against silently missing reference columns in the feature matrix, which would indicate a problem with the one-hot encoding or the input data.
@@ -359,7 +351,6 @@ def build_feature_matrix(patients):
     return X, feature_names
 
 # STEP 5: Fit Model 1 (pre-treatment)
-
 def fit_model(X, y):
     """Fit a logistic regression model on the patient features and outcomes.
     
@@ -371,7 +362,7 @@ def fit_model(X, y):
     model: A fitted LogisticRegression model.
     """
     # As sklearn defaults to L2 regularisation, which shrinks by an amount specific to each model's data and breaks M1 $ M2  coeficinent comparability
-    # We explicitly set C=np.inf as it gives ab unpenalised fit. 
+    # Explicitly set C=np.inf as it gives ab unpenalised fit. 
     # Sklean regularises by default, which would shrink the M1 and M2 coefficients by different amounts, making them not directly comparable.
     
     model_1 = LogisticRegression(C=np.inf, max_iter=2000).fit(X, y)
@@ -444,6 +435,7 @@ def apply_statin_intervention(patients_2, model_1, *, threshold=0.10, rrr=0.25, 
     y_2 = risk_to_event(true_risk_post_b, random_seed=random_seed)
 
     return X_2, y_2, on_statins, true_risk_b, true_risk_post_b, feature_names, uptake_per_patient
+
 # STEP 7: Compare Model 1 and Model 2 Coefficients (MICS Signal)
 def coefficients_comparison(model_1, model_2, feature_names, features=None):
     """Compare the coefficients of the two logistic regression models across their features.
@@ -555,13 +547,13 @@ def evaluate_predictions(y_true, predicted_risk, true_risk_pct, prefix, *, thres
             return float(numerator / denominator) if denominator != 0 else float("nan")
     
 
-    # 1. Discrimination: ROC-AUC and PR-AUC
+    # Discrimination: ROC-AUC and PR-AUC
     # These measure ranking rather than absolute risk, 
     # so they use the continuous probabilities rather than binary predictions 
     metrics[f"{prefix}_auc"] = float(roc_auc_score(y_true, predicted_risk))
     metrics[f"{prefix}_pr_auc"] = float(average_precision_score(y_true, predicted_risk))
 
-    # 2. Threshold-based metrics: Sensitivity, Specificity, PPV, NPV, F1 Score
+    # Threshold-based metrics: Sensitivity, Specificity, PPV, NPV, F1 Score
     # Convert the probabilities into binary predictions based on the clinical threshold
     y_pred = (predicted_risk >= threshold).astype(int)
 
@@ -574,10 +566,10 @@ def evaluate_predictions(y_true, predicted_risk, true_risk_pct, prefix, *, thres
     metrics[f"{prefix}_npv"] = safe_divide(tn, tn + fn)
     metrics[f"{prefix}_f1"] = float(f1_score(y_true, y_pred, zero_division=0))
 
-    # 3. Number of patients flagged for statin allocation based on the threshold
+    # Number of patients flagged for statin allocation based on the threshold
     metrics[f"{prefix}_n_flagged"] = int(tp + fp)
 
-    # 4. Underprediction among genuinely high-risk patinets 
+    # Underprediction among genuinely high-risk patinets 
     # Patinets are selected based on thier true QRISK3 risk, rather than the model's prediction
     # So both models are compared on the same people (boolean indexing)
     truely_high_risk = true_risk_pct >= (threshold * 100)  # Converts the threshold to percentage for comparison
@@ -587,14 +579,13 @@ def evaluate_predictions(y_true, predicted_risk, true_risk_pct, prefix, *, thres
 
     return metrics
 
-
 # Step 11: Generate the three populations, fit both models , predict on C 
 def run_pipeline(seed, n=100_000, *, threshold=0.10, rrr=0.25, uptake=1.0, statin_covariate=False, covariate_value="zeros"):
     """Run the MICS simulation pipeline and return the models and per-patient arrays.
     
     Args:
     seed: All six random draws are derived from this single seed, so a run is reproducible
-        from one number
+    from one number
     n: Number of patients in each population
     threshold: The predicted risk at which statins are allocated (NICE CG181 = 0.10)
     rrr: Relative risk reduction from statins (0.25 = 25%)
@@ -602,7 +593,7 @@ def run_pipeline(seed, n=100_000, *, threshold=0.10, rrr=0.25, uptake=1.0, stati
     
     Returns:
     dict: Both fitted models, feature names, treatment allocation, 
-        and the outcomes Run settings, true risks and predictions for population C 
+    and the outcomes Run settings, true risks and predictions for population C 
         
     """
     # Derive independent seeds from the single input seed so the whole run is
@@ -690,21 +681,25 @@ def run_simulation(seed, n=100_000, *, threshold=0.10, rrr=0.25, uptake=1.0, sta
 
     Args:
     seed: All six random draws are derived from this single seed, so a run is reproducible
-        from one number
+    from one number
     n: Number of patients in each population
     threshold: The predicted risk at which statins are allocated (NICE CG181 = 0.10)
     rrr: Relative risk reduction from statins (0.25 = 25%)
 
     Returns:
     dict: Contains the run settings, proportion treated, actual event rate in population C,
-        both models' mean predicted risk, the under-prediction gaps in
-        percentage points, both models' coefficients, and the metrics
+    both models' mean predicted risk, the under-prediction gaps in
+    percentage points, both models' coefficients, and the metrics
     """
 
+    # run_pipeline generates the three populations and fits both models. 
+    # It is kept seperate so the calibratin analysis can reuse the per-patient arrays,
+    # which this function onnly needs in a summarised form
     pipeline_output = run_pipeline(seed, n, threshold=threshold, rrr=rrr, uptake=uptake, 
                                    statin_covariate=statin_covariate, covariate_value=covariate_value,
                                 )
 
+    # Unpack each variable into local names so the results block can be read simply 
     model_1 = pipeline_output["model_1"]
     model_2 = pipeline_output["model_2"]
     feature_names = pipeline_output["feature_names"]
@@ -718,6 +713,8 @@ def run_simulation(seed, n=100_000, *, threshold=0.10, rrr=0.25, uptake=1.0, sta
     ethnicity_b = pipeline_output["ethnicity_b"]
     ethnicity_c = pipeline_output["ethnicity_c"]
 
+    # The metrics are calculated seperately for each model on the same untreated population,
+    # so any difference comes from the models rather that the patients 
     m1_metrics = evaluate_predictions(
         y_c, m1_predicted_risk_c, true_risk_c, "m1", threshold=threshold
     )
@@ -762,17 +759,17 @@ def run_simulation(seed, n=100_000, *, threshold=0.10, rrr=0.25, uptake=1.0, sta
 
     results = {"seed": seed, "n": n, "threshold": threshold, "rrr": rrr, "uptake_type": "differential" if isinstance(uptake, dict) else "uniform",
     "uptake_mean": float(uptake_per_patient.mean()) if isinstance(uptake, dict) else float(uptake),
-               "proportion_treated": float(on_statins.mean()),
-               "event_rate_c": actual_c,
-               "m1_mean_c": m1_mean_c, 
-               "m2_mean_c": m2_mean_c,
-               "underprediction_vs_truth_pp": underprediction_vs_truth_pp,
-               "m1_m2_pp_gap": m1_m2_pp_gap,
-               # M2's under-prediction is partly due to a baseline shift, not only model attenuataion. 
-               # Part of the shift lives in the intercept rather than in the coefficients, so it is stored alongside the coefficients
-               # so the shift can be separated from the attenuation.
-               "m1_intercept": float(model_1.intercept_[0]),
-               "m2_intercept": float(model_2.intercept_[0]),      
+        "proportion_treated": float(on_statins.mean()),
+        "event_rate_c": actual_c,
+        "m1_mean_c": m1_mean_c, 
+        "m2_mean_c": m2_mean_c,
+        "underprediction_vs_truth_pp": underprediction_vs_truth_pp,
+        "m1_m2_pp_gap": m1_m2_pp_gap,
+        # M2's under-prediction is partly due to a baseline shift, not only model attenuataion. 
+        # Part of the shift lives in the intercept rather than in the coefficients, so it is stored alongside the coefficients
+        # so the shift can be separated from the attenuation.
+        "m1_intercept": float(model_1.intercept_[0]),
+        "m2_intercept": float(model_2.intercept_[0]),      
  
     }
     # Add the coefficients keys into to the results dictionary, keeping them flat and easily accessible for analysis.
@@ -816,3 +813,4 @@ def calibration_points(y_true, predicted_risk, n_bins=10):
     observed_rate = np.array([bin.mean() for bin in y_bins])
 
     return mean_predicted, observed_rate
+
